@@ -18,14 +18,54 @@ package util
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 const (
 	nonExist = "NonExist"
 )
+
+type PodResource struct {}
+
+// NewPodStore creates PodStore based on given namespace, label selector and field selector.
+func (PodResource) NewStore(c clientset.Interface, namespace string, labelSelector string, fieldSelector string) (*ResourceStore, error) {
+	lw := &cache.ListWatch{
+		ListFunc: func(options metav1.ListOptions) (runtime.Object, error) {
+			options.LabelSelector = labelSelector
+			options.FieldSelector = fieldSelector
+			obj, err := c.CoreV1().Pods(namespace).List(options)
+			return runtime.Object(obj), err
+		},
+		WatchFunc: func(options metav1.ListOptions) (watch.Interface, error) {
+			options.LabelSelector = labelSelector
+			options.FieldSelector = fieldSelector
+			return c.CoreV1().Pods(namespace).Watch(options)
+		},
+	}
+	store := cache.NewStore(cache.MetaNamespaceKeyFunc)
+	stopCh := make(chan struct{})
+	name := fmt.Sprintf("PodStore: %s", CreateSelectorsString(namespace, labelSelector, fieldSelector))
+	reflector := cache.NewNamedReflector(name, lw, &v1.Pod{}, store, 0)
+	go reflector.Run(stopCh)
+	if err := wait.PollImmediate(50*time.Millisecond, 2*time.Minute, func() (bool, error) {
+		if len(reflector.LastSyncResourceVersion()) != 0 {
+			return true, nil
+		}
+		return false, nil
+	}); err != nil {
+		close(stopCh)
+		return nil, err
+	}
+	return &ResourceStore{Store: store, stopCh: stopCh, Reflector: reflector}, nil
+}
 
 // PodsStartupStatus represents status of a pods group.
 type PodsStartupStatus struct {

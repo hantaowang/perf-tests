@@ -18,10 +18,10 @@ package util
 
 import (
 	"fmt"
+	"k8s.io/apimachinery/pkg/runtime"
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
@@ -35,7 +35,8 @@ const (
 )
 
 // WaitForPodOptions is an options used by WaitForPods methods.
-type WaitForPodOptions struct {
+type WaitForResourceOptions struct {
+	Type								string
 	Namespace           string
 	LabelSelector       string
 	FieldSelector       string
@@ -43,62 +44,62 @@ type WaitForPodOptions struct {
 	EnableLogging       bool
 	CallerName          string
 	WaitForPodsInterval time.Duration
+	Resource						Resource
 }
 
 // WaitForPods waits till disire nuber of pods is running.
 // Pods are be specified by namespace, field and/or label selectors.
 // If stopCh is closed before all pods are running, the error will be returned.
-func WaitForPods(clientSet clientset.Interface, stopCh <-chan struct{}, options *WaitForPodOptions) error {
+func WaitForResource(clientSet clientset.Interface, stopCh <-chan struct{}, options *WaitForResourceOptions) error {
 	// TODO(#269): Change to shared podStore.
-	ps, err := NewPodStore(clientSet, options.Namespace, options.LabelSelector, options.FieldSelector)
+	store, err := options.Resource.NewStore(clientSet, options.Namespace, options.LabelSelector, options.FieldSelector)
 	if err != nil {
-		return fmt.Errorf("pod store creation error: %v", err)
+		return fmt.Errorf("store creation error: %v", err)
 	}
-	defer ps.Stop()
+	defer store.Stop()
 
-	var podsStatus PodsStartupStatus
+	startUpStatus := options.Resource.CreateStartUpStatus([]runtime.Object{})
 	selectorsString := CreateSelectorsString(options.Namespace, options.LabelSelector, options.FieldSelector)
 	scaling := uninitialized
-	var oldPods []*corev1.Pod
+	var oldResources []runtime.Object
 	for {
 		select {
 		case <-stopCh:
-			return fmt.Errorf("timeout while waiting for %d pods to be running in namespace '%v' with labels '%v' and fields '%v' - only %d found running",
-				options.DesiredPodCount, options.Namespace, options.LabelSelector, options.FieldSelector, podsStatus.Running)
+			return startUpStatus.TimeoutError(options)
 		case <-time.After(options.WaitForPodsInterval):
-			pods := ps.List()
-			podsStatus = ComputePodsStartupStatus(pods, options.DesiredPodCount)
+			resources := store.List()
+			startUpStatus.RecomputeStartUpStatus(resources)
 			if scaling != uninitialized {
-				diff := DiffPods(oldPods, pods)
-				deletedPods := diff.DeletedPods()
-				if scaling != down && len(deletedPods) > 0 {
-					klog.Errorf("%s: %s: %d pods disappeared: %v", options.CallerName, selectorsString, len(deletedPods), strings.Join(deletedPods, ", "))
+				diff := options.Resource.ComputeDiff(oldResources, resources)
+				deletedResources := diff.DeletedResources()
+				if scaling != down && len(deletedResources) > 0 {
+					klog.Errorf("%s: %s: %d %s disappeared: %v", options.CallerName, selectorsString, len(deletedResources), options.Type, strings.Join(deletedResources, ", "))
 					klog.Infof("%s: %v", options.CallerName, diff.String(sets.NewString()))
 				}
-				addedPods := diff.AddedPods()
-				if scaling != up && len(addedPods) > 0 {
-					klog.Errorf("%s: %s: %d pods appeared: %v", options.CallerName, selectorsString, len(deletedPods), strings.Join(deletedPods, ", "))
+				addedResources := diff.AddedResources()
+				if scaling != up && len(addedResources) > 0 {
+					klog.Errorf("%s: %s: %d %s appeared: %v", options.CallerName, selectorsString, len(addedResources), options.Type, strings.Join(addedResources, ", "))
 					klog.Infof("%s: %v", options.CallerName, diff.String(sets.NewString()))
 				}
 			} else {
 				switch {
-				case len(pods) == options.DesiredPodCount:
+				case len(resources) == options.DesiredPodCount:
 					scaling = none
-				case len(pods) < options.DesiredPodCount:
+				case len(resources) < options.DesiredPodCount:
 					scaling = up
-				case len(pods) > options.DesiredPodCount:
+				case len(resources) > options.DesiredPodCount:
 					scaling = down
 				}
 			}
 			if options.EnableLogging {
-				klog.Infof("%s: %s: %s", options.CallerName, selectorsString, podsStatus.String())
+				klog.Infof("%s: %s: %s", options.CallerName, selectorsString, startUpStatus.String())
 			}
 			// We allow inactive pods (e.g. eviction happened).
 			// We wait until there is a desired number of pods running and all other pods are inactive.
-			if len(pods) == (podsStatus.Running+podsStatus.Inactive) && podsStatus.Running == options.DesiredPodCount {
+			if options.Resource.StartUpComplete(resources, startUpStatus) {
 				return nil
 			}
-			oldPods = pods
+			oldResources = resources
 		}
 	}
 }
