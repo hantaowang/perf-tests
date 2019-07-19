@@ -1,0 +1,3 @@
+TEST_NAME: multi-node-cluster-load-scale-by-node
+PODS_PER_NODE: 10
+PVC_PER_POD: 1

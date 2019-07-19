@@ -1,0 +1,142 @@
+# ASSUMPTIONS:
+# TODO: Assumptions
+
+# Constants
+  {{$NODE_MODE := DefaultParam .NODE_MODE "allnodes"}}
+  {{$DEFAULT_NODES_PER_NAMESPACE := DefaultParam .NODES_PER_NAMESPACE 100}}
+
+# Variables
+  {{$PODS_PER_NODE := DefaultParam .PODS_PER_NODE 50}}
+  {{$PVC_PER_POD := DefaultParam .PVC_PER_POD 2}}
+  {{$ENABLE_CHAOSMONKEY := DefaultParam .ENABLE_CHAOSMONKEY false}}
+  {{$TEST_NAME := DefaultParam .TEST_NAME "generic-test"}}
+  {{$PVC_SIZE := DefaultParam .PVC_SIZE "8Gi"}}
+  {{$PER_PVC_BOUND_SLO := DefaultParam .PVC_BOUND_SLO 2}}
+  {{$POD_STARTUP_SLO := DefaultParam .POD_STARTUP_SLO 300}}
+  {{$OBJ_CREATION_QPS := DefaultParam .OBJ_CREATION_QPS 10}}
+
+# Calculated
+  {{$minNamespaces := DivideInt .Nodes $DEFAULT_NODES_PER_NAMESPACE}}
+  {{$namespaces := MaxInt $minNamespaces 1}}
+  {{$nodesPerNamespace := DivideInt .Nodes $namespaces}}
+  {{$podsPerNamespace := MultiplyInt $nodesPerNamespace $PODS_PER_NODE}}
+  {{$pvcsPerNamespace := MultiplyInt $podsPerNamespace $PVC_PER_POD}}
+  {{$totalPVCs := MultiplyInt $pvcsPerNamespace $namespaces}}
+  {{$PVCBoundTime := MultiplyInt $totalPVCs $PER_PVC_BOUND_SLO | MaxInt 60}}
+
+name: pv-storage-{{$TEST_NAME}}
+automanagedNamespaces: {{$namespaces}}
+tuningSets:
+  - name: Sequence
+    parallelismLimitedLoad:
+      parallelismLimit: 1
+  - name: UniformQPS
+    qpsLoad:
+      qps: {{$OBJ_CREATION_QPS}}
+  {{if $ENABLE_CHAOSMONKEY}}
+chaosMonkey:
+  nodeFailure:
+    failureRate: 0.01
+    interval: 1m
+    jitterFactor: 10.0
+    simulatedDowntime: 10m
+  {{end}}
+steps:
+  - measurements:
+      - Identifier: APIResponsiveness
+        Method: APIResponsiveness
+        Params:
+          action: reset
+      - Identifier: APIResponsivenessPrometheus
+        Method: APIResponsivenessPrometheus
+        Params:
+          action: start
+      - Identifier: TestMetrics
+        Method: TestMetrics
+        Params:
+          action: start
+          nodeMode: {{$NODE_MODE}}
+  # Create PVCs
+  - phases:
+      - namespaceRange:
+          min: 1
+          max: {{$namespaces}}
+        replicasPerNamespace: {{$pvcsPerNamespace}}
+        tuningSet: UniformQPS
+        objectBundle:
+          - basename: pvc
+            objectTemplatePath: pvc.yaml
+            templateFillMap:
+              PVCSize: {{$PVC_SIZE}}
+  - measurements:
+      - Identifier: WaitForPVCsToBeBound
+        Method: WaitForBoundPVCs
+        Params:
+          desiredPVCCount: {{MultiplyInt $pvcsPerNamespace $namespaces}}
+          apiVersion: v1
+          labelSelector: group = test-pvc
+          timeout: {{MultiplyInt $PVCBoundTime 2}}s
+  # Create Pods
+  - measurements:
+    - Identifier: PodStartupLatency
+      Method: PodStartupLatency
+      Params:
+        action: start
+        labelSelector: group = test-pod
+        threshold: {{$PVCBoundTime}}s
+  - phases:
+      - namespaceRange:
+          min: 1
+          max: {{$namespaces}}
+        replicasPerNamespace: {{$podsPerNamespace}}
+        tuningSet: UniformQPS
+        objectBundle:
+          - basename: pod
+            objectTemplatePath: pod.yaml
+            templateFillMap:
+              PVCsPerPod: {{$PVC_PER_POD}}
+  - measurements:
+      - Identifier: WaitForRunningPodsWithPVC
+        Method: WaitForRunningPods
+        Params:
+          desiredPodCount: {{MultiplyInt $podsPerNamespace $namespaces}}
+          apiVersion: v1
+          labelSelector: group = test-pod
+          timeout: {{MultiplyInt $POD_STARTUP_SLO 2}}s
+  - measurements:
+    - Identifier: PodStartupLatency
+      Method: PodStartupLatency
+      Params:
+        action: gather
+  # Delete Resources
+  - phases:
+    - namespaceRange:
+        min: 1
+        max: {{$namespaces}}
+      replicasPerNamespace: 0
+      tuningSet: Sequence
+      objectBundle:
+        - basename: {{$TEST_NAME}}-pod
+          objectTemplatePath: pod.yaml
+    - namespaceRange:
+        min: 1
+        max: {{$namespaces}}
+      replicasPerNamespace: 0
+      tuningSet: Sequence
+      objectBundle:
+        - basename: {{$TEST_NAME}}-pvc
+          objectTemplatePath: pvc.yaml
+  # Collect measurements
+  - measurements:
+      - Identifier: APIResponsiveness
+        Method: APIResponsiveness
+        Params:
+          action: gather
+      - Identifier: APIResponsivenessPrometheus
+        Method: APIResponsivenessPrometheus
+        Params:
+          action: gather
+      - Identifier: TestMetrics
+        Method: TestMetrics
+        Params:
+          action: gather

@@ -1,0 +1,3 @@
+TEST_NAME: single-node-scale-by-pod
+PODS_PER_NODE: 100
+PVC_PER_POD: 1
