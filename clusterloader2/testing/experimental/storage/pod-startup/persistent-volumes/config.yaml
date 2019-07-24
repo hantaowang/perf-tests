@@ -20,7 +20,7 @@
   {{$namespaces := MaxInt $minNamespaces 1}}
   {{$nodesPerNamespace := DivideInt .Nodes $namespaces}}
   {{$podsPerNamespace := MultiplyInt $nodesPerNamespace $PODS_PER_NODE}}
-  {{$pvcsPerNamespace := MultiplyInt $podsPerNamespace $nodesPerNamespace}}
+  {{$pvcsPerNamespace := MultiplyInt $podsPerNamespace $PVC_PER_POD}}
   {{$totalPVCs := MultiplyInt $pvcsPerNamespace $namespaces}}
   {{$PVCBoundTime := MultiplyInt $totalPVCs $PER_PVC_BOUND_SLO | MaxInt 60}}
 
@@ -72,7 +72,7 @@ steps:
       - Identifier: WaitForPVCsToBeBound
         Method: WaitForBoundPVCs
         Params:
-          desiredPVCCount: {{MultiplyInt $podsPerNamespace $PVC_PER_POD}}
+          desiredPVCCount: {{MultiplyInt $pvcsPerNamespace $namespaces}}
           apiVersion: v1
           labelSelector: group = test-pvc
           timeout: {{MultiplyInt $PVCBoundTime 2}}s
