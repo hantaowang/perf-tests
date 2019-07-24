@@ -1,31 +1,41 @@
 # ASSUMPTIONS:
 # TODO: Assumptions
 
-# Constants
+# Cluster Variables
   {{$NODE_MODE := DefaultParam .NODE_MODE "allnodes"}}
   {{$DEFAULT_NODES_PER_NAMESPACE := DefaultParam .NODES_PER_NAMESPACE 100}}
 
-# Variables
-  {{$PODS_PER_NODE := DefaultParam .PODS_PER_NODE 50}}
-  {{$PVC_PER_POD := DefaultParam .PVC_PER_POD 2}}
+# Test Framework Variables
   {{$ENABLE_CHAOSMONKEY := DefaultParam .ENABLE_CHAOSMONKEY false}}
   {{$TEST_NAME := DefaultParam .TEST_NAME "generic-test"}}
-  {{$PVC_SIZE := DefaultParam .PVC_SIZE "8Gi"}}
-  {{$PER_PVC_BOUND_SLO := DefaultParam .PVC_BOUND_SLO 2}}
-  {{$POD_STARTUP_SLO := DefaultParam .POD_STARTUP_SLO 300}}
   {{$OBJ_CREATION_QPS := DefaultParam .OBJ_CREATION_QPS 10}}
+
+# Test Volume Variables
+  {{$PODS_PER_NODE := DefaultParam .PODS_PER_NODE 50}}
+  {{$VOLS_PER_POD := DefaultParam .VOLS_PER_POD 2}}
+  {{$VOL_SIZE := DefaultParam .VOL_SIZE "8Gi"}}
+  {{$POD_STARTUP_SLO := DefaultParam .POD_STARTUP_SLO 300}}
+  {{$PROVISION_VOLUME := DefaultParam .PROVISION_VOLUME false}}
+
+  {{$VOLUME_TEMPLATE_PATH := .VOLUME_TEMPLATE_PATH}}
+  {{$PROVISION_VOLUME := DefaultParam .PROVISION_VOLUME false}}
 
 # Calculated
   {{$minNamespaces := DivideInt .Nodes $DEFAULT_NODES_PER_NAMESPACE}}
   {{$namespaces := MaxInt $minNamespaces 1}}
   {{$nodesPerNamespace := DivideInt .Nodes $namespaces}}
   {{$podsPerNamespace := MultiplyInt $nodesPerNamespace $PODS_PER_NODE}}
-  {{$pvcsPerNamespace := MultiplyInt $podsPerNamespace $PVC_PER_POD}}
-  {{$totalPVCs := MultiplyInt $pvcsPerNamespace $namespaces}}
+  {{$volsPerNamespace := MultiplyInt $podsPerNamespace $VOLS_PER_POD}}
+  {{$PVCBoundTime := MultiplyInt $totalPVCs $PER_PVC_BOUND_SLO | MaxInt 60}}
+
+# PVC Only
+  {{$IS_PVC_TEST := DefaultParam .IS_PVC_TEST false}}
+  {{$PER_PVC_BOUND_SLO := DefaultParam .PVC_BOUND_SLO 2}}
+  {{$totalPVCs := MultiplyInt $volsPerNamespace $namespaces}}
   {{$PVCBoundTime := MultiplyInt $totalPVCs $PER_PVC_BOUND_SLO | MaxInt 60}}
 
 name: pv-storage-{{$TEST_NAME}}
-automanagedNamespaces: {{$namespaces}}
+automanagedNamespaces: {{$namespa ces}}
 tuningSets:
   - name: Sequence
     parallelismLimitedLoad:
@@ -56,26 +66,31 @@ steps:
         Params:
           action: start
           nodeMode: {{$NODE_MODE}}
-  # Create PVCs
+  {{if $PROVISION_VOLUME}}
+  # Provision Volumes
   - phases:
-      - namespaceRange:
-          min: 1
-          max: {{$namespaces}}
-        replicasPerNamespace: {{$pvcsPerNamespace}}
-        tuningSet: UniformQPS
-        objectBundle:
-          - basename: pvc
-            objectTemplatePath: pvc.yaml
-            templateFillMap:
-              PVCSize: {{$PVC_SIZE}}
+    - namespaceRange:
+        min: 1
+        max: {{$namespaces}}
+      replicasPerNamespace: {{$volsPerNamespace}}
+      tuningSet: UniformQPS
+      objectBundle:
+        - basename: vol
+          objectTemplatePath: {{$VOLUME_TEMPLATE_PATH}}
+          templateFillMap:
+            volSize: {{$VOL_SIZE}}
+  {{end}}
+  {{if $IS_PVC_TEST}}
+  # Wait for PVCs to be Bound
   - measurements:
-      - Identifier: WaitForPVCsToBeBound
-        Method: WaitForBoundPVCs
-        Params:
-          desiredPVCCount: {{MultiplyInt $pvcsPerNamespace $namespaces}}
-          apiVersion: v1
-          labelSelector: group = test-pvc
-          timeout: {{MultiplyInt $PVCBoundTime 2}}s
+    - Identifier: WaitForPVCsToBeBound
+      Method: WaitForBoundPVCs
+      Params:
+        desiredPVCCount: {{MultiplyInt $pvcsPerNamespace $namespaces}}
+        apiVersion: v1
+        labelSelector: group = volume-scale-tests
+        timeout: {{MultiplyInt $PVCBoundTime 2}}s
+  {{end}}
   # Create Pods
   - measurements:
     - Identifier: PodStartupLatency
@@ -83,26 +98,26 @@ steps:
       Params:
         action: start
         labelSelector: group = test-pod
-        threshold: {{$PVCBoundTime}}s
+        threshold: {{$POD_STARTUP_SLO}}s
   - phases:
-      - namespaceRange:
-          min: 1
-          max: {{$namespaces}}
-        replicasPerNamespace: {{$podsPerNamespace}}
-        tuningSet: UniformQPS
-        objectBundle:
-          - basename: pod
-            objectTemplatePath: pod.yaml
-            templateFillMap:
-              PVCsPerPod: {{$PVC_PER_POD}}
+    - namespaceRange:
+        min: 1
+        max: {{$namespaces}}
+      replicasPerNamespace: {{$podsPerNamespace}}
+      tuningSet: UniformQPS
+      objectBundle:
+        - basename: pod
+          objectTemplatePath: {{$POD_TEMPLATE_PATH}}
+          templateFillMap:
+            VolumesPerPod: {{$VOLUMES_PER_POD}}
   - measurements:
-      - Identifier: WaitForRunningPodsWithPVC
-        Method: WaitForRunningPods
-        Params:
-          desiredPodCount: {{MultiplyInt $podsPerNamespace $namespaces}}
-          apiVersion: v1
-          labelSelector: group = test-pod
-          timeout: {{MultiplyInt $POD_STARTUP_SLO 2}}s
+    - Identifier: WaitForRunningPodsWithVol
+      Method: WaitForRunningPods
+      Params:
+        desiredPodCount: {{MultiplyInt $podsPerNamespace $namespaces}}
+        apiVersion: v1
+        labelSelector: group = volume-scale-tests
+        timeout: {{MultiplyInt $POD_STARTUP_SLO 2}}s
   - measurements:
     - Identifier: PodStartupLatency
       Method: PodStartupLatency
@@ -116,16 +131,16 @@ steps:
       replicasPerNamespace: 0
       tuningSet: Sequence
       objectBundle:
-        - basename: {{$TEST_NAME}}-pod
-          objectTemplatePath: pod.yaml
+        - basename: pod
+          objectTemplatePath: {{$POD_TEMPLATE_PATH}}
     - namespaceRange:
         min: 1
         max: {{$namespaces}}
       replicasPerNamespace: 0
       tuningSet: Sequence
       objectBundle:
-        - basename: {{$TEST_NAME}}-pvc
-          objectTemplatePath: pvc.yaml
+        - basename: vol
+          objectTemplatePath: {{$VOLUME_TEMPLATE_PATH}}
   # Collect measurements
   - measurements:
       - Identifier: APIResponsiveness

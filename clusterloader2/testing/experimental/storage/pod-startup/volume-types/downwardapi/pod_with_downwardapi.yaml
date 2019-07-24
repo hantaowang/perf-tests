@@ -1,13 +1,11 @@
 {{$index := .Index}}
-{{$appName := .AppName}}
 {{$volumesPerPod := .VolumesPerPod}}
 apiVersion: v1
 kind: Pod
 metadata:
   name: {{.Name}}
   labels:
-    app: {{.Name}}
-    group: {{.Group}}
+    group: volume-scale-tests
 spec:
   containers:
   - name: {{.Name}}
@@ -21,5 +19,12 @@ spec:
   volumes:
   {{ range $volumeIndex, $vol := Seq .VolumesPerPod }}
   - name: vol-{{$volumeIndex}}
-    emptyDir: {}
+    downwardAPI:
+      items:
+      - path: "pod_name"
+        fieldRef:
+          fieldPath: metadata.name
+      - path: "pod_namespace"
+        fieldRef:
+          fieldPath: metadata.namespace
   {{ end }}
