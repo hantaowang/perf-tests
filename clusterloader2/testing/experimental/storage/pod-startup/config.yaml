@@ -111,6 +111,13 @@ steps:
     objectBundle:
     - basename: pod
       objectTemplatePath: {{$POD_TEMPLATE_PATH}}
+- measurements:
+    - Identifier: WaitForTestPodsDeleted
+      Method: WaitForRunningPods
+      Params:
+        desiredPodCount: 0
+        labelSelector: group = volume-test
+        timeout: {{$POD_STARTUP_TIMEOUT}}
 {{ if $PROVISION_VOLUME }}
 # Delete volumes
 - phases:
@@ -122,6 +129,16 @@ steps:
     objectBundle:
       - basename: vol
         objectTemplatePath: {{$VOLUME_TEMPLATE_PATH}}
+{{ end }}
+{{ if $WAIT_FOR_PVC }}
+- measurements:
+    - Identifier: WaitForPVCsToBeBound
+      Method: WaitForBoundPVCs
+      Params:
+        desiredPVCCount: 0
+        apiVersion: v1
+        labelSelector: group = volume-test
+        timeout: {{$PVCBoundTime}}s
 {{ end }}
 # Collect measurements
 - measurements:
